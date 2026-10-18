@@ -1,5 +1,5 @@
 """
-EcoSpillGuard — 8-page Live Hardware Investigation Report
+EcoSpillGuard — Live Hardware Investigation Report
 =========================================================
 Fetches the latest real reading from the local backend and generates an
 8-page PDF. Missing values are explicitly marked unavailable; no readings,
@@ -13,7 +13,6 @@ Backend endpoint:
 
 Firebase incident details can be integrated later.
 """
-
 from datetime import datetime
 from pathlib import Path
 import json
@@ -21,12 +20,15 @@ import sys
 import urllib.error
 import urllib.request
 from xml.sax.saxutils import escape
+from recommendation_engine import recommend
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
     PageBreak, KeepTogether
@@ -110,12 +112,12 @@ def make_styles():
         fontSize=9, leading=13, textColor=WARNING_TEXT, spaceAfter=2.5 * mm,
     ))
     s.add(ParagraphStyle(
-        name="Cell", parent=s["BodyText"], fontSize=7.7, leading=10,
+        name="Cell", parent=s["BodyText"], fontSize=8.5, leading=11,
         wordWrap="CJK",
     ))
     s.add(ParagraphStyle(
         name="CellHeader", parent=s["BodyText"], fontName="Helvetica-Bold",
-        fontSize=7.7, leading=10, textColor=colors.white, wordWrap="CJK",
+        fontSize=8.5, leading=11, textColor=colors.white, wordWrap="CJK",
     ))
     s.add(ParagraphStyle(
         name="Raw", parent=s["Code"], fontName="Courier",
@@ -189,22 +191,93 @@ def gps_note(gps_status, lat, lon):
             f"Backend GPS status: {display(gps_status)}. Verify the fix.")
 
 
+
+class NumberedCanvas(Canvas):
+    """Canvas that adds the real total page count after the story is laid out."""
+
+    def __init__(self, *args, **kwargs):
+        Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        page_count = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self._draw_page_number(page_count)
+            Canvas.showPage(self)
+        Canvas.save(self)
+
+    def _draw_page_number(self, page_count):
+        self.saveState()
+        self.setFillColor(MID_GREY)
+        self.setFont("Helvetica", 8)
+        self.drawRightString(
+            A4[0] - 18 * mm, 9 * mm,
+            f"Page {self._pageNumber} of {page_count}"
+        )
+        self.restoreState()
+
+
 def draw_page(canvas, doc):
+    """Draw a consistent branded header and footer on every page."""
     canvas.saveState()
+
     w, h = A4
+    logo_path = Path(__file__).resolve().parent / "eco_spill_logo.jpeg"
+
+    # The light logo panel keeps the real JPEG legible on every page.
+    header_height = 18 * mm
     canvas.setFillColor(NAVY)
-    canvas.rect(0, h - 12 * mm, w, 12 * mm, fill=1, stroke=0)
+    canvas.rect(0, h - header_height, w, header_height,
+                fill=1, stroke=0)
     canvas.setFillColor(colors.white)
-    canvas.setFont("Helvetica-Bold", 9)
-    canvas.drawString(18 * mm, h - 7.5 * mm, "ECOSPILLGUARD")
-    canvas.setFont("Helvetica", 8)
-    canvas.drawRightString(w - 18 * mm, h - 7.5 * mm, "Oil Spill Investigation Report")
+    canvas.rect(0, h - header_height, 58 * mm, header_height,
+                fill=1, stroke=0)
+
+    # Place the real EcoSpill logo on the left, if the file exists.
+    if logo_path.exists():
+        image = ImageReader(str(logo_path))
+        image_width, image_height = image.getSize()
+        max_width, max_height = 39 * mm, 13 * mm
+        scale = min(max_width / image_width, max_height / image_height)
+        draw_width, draw_height = image_width * scale, image_height * scale
+        canvas.drawImage(
+            image,
+            18 * mm,
+            h - (header_height + draw_height) / 2,
+            width=draw_width,
+            height=draw_height,
+            mask="auto",
+        )
+    else:
+        # Clear fallback if the logo file has not been added yet.
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 10)
+        canvas.drawString(18 * mm, h - 11 * mm, "EcoSpillGuard")
+
+    # Report title aligned to the right.
+    canvas.setFillColor(colors.white)
+    canvas.setFont("Helvetica", 8.5)
+    canvas.drawRightString(
+        w - 18 * mm, h - 10.5 * mm,
+        "Oil Spill Investigation Report"
+    )
+
+    # Footer separator.
     canvas.setStrokeColor(BORDER)
+    canvas.setLineWidth(0.6)
     canvas.line(18 * mm, 14 * mm, w - 18 * mm, 14 * mm)
+
     canvas.setFillColor(MID_GREY)
-    canvas.setFont("Helvetica", 7.5)
-    canvas.drawString(18 * mm, 9 * mm, "PROTOTYPE — MASTER / CHIEF ENGINEER MUST VERIFY")
-    canvas.drawRightString(w - 18 * mm, 9 * mm, f"Page {doc.page} of 8")
+    canvas.setFont("Helvetica", 8)
+    canvas.drawString(
+        18 * mm, 9 * mm,
+        "PROTOTYPE - MASTER / CHIEF ENGINEER MUST VERIFY"
+    )
     canvas.restoreState()
 
 
@@ -425,14 +498,82 @@ def build_report(reading):
         P("The final application can supply additional incident details from Firebase, including vessel/tank "
           "metadata, crew-selected cause category, action timeline, and evidence references. These fields are "
           "intentionally not connected in this version.", s["Body9"]),
-        P("Case-based recommendations", s["SubTitle"]),
-        P("A future recommendation section can retrieve relevant past spill cases from the case library and "
-          "cite each case ID. Recommendations should be based on retrieved case records, not presented as "
-          "verified facts about this current reading.", s["Body9"]),
+
+        P("Historical Case-Based Recommendations", s["SubTitle"]),
+    ]
+
+    # Retrieve relevant lessons from the historical spill case library.
+    try:
+        results = recommend(
+            cause="",
+            oil_type="",
+            incident_description=(
+                f"Ultrasonic tank-level reading: "
+                f"{reading.get('distance_cm', 'unavailable')} cm. "
+                f"Current hardware status: "
+                f"{reading.get('status', 'unavailable')}. "
+                f"LED state: {reading.get('led', 'unavailable')}."
+            ),
+            top_k=3,
+        )
+
+        recommendations = results.get("recommendations", [])
+
+        if recommendations:
+            for case in recommendations:
+                story.append(KeepTogether([
+                    P(
+                        f"{case.get('case_id', 'Case ID unavailable')} — "
+                        f"{case.get('incident_name', 'Incident name unavailable')}",
+                        s["SubTitle"],
+                    ),
+                    P(
+                        f"Cause category: {case.get('cause_category', 'Not specified')}",
+                        s["Body9"],
+                    ),
+                    P(
+                        f"Measures taken: {case.get('measures_taken', 'Not specified')}",
+                        s["Body9"],
+                    ),
+                    P(
+                        f"Preventive measures: "
+                        f"{case.get('preventive_measures', 'Not specified')}",
+                        s["Body9"],
+                    ),
+                    P(
+                        f"Source: {case.get('source', 'Not supplied')}",
+                        s["BodySmall"],
+                    ),
+                    P(
+                        f"Source type: {case.get('source_type', 'Not specified')} | "
+                        f"Match score: {case.get('match_score', 'Not specified')}",
+                        s["BodySmall"],
+                    ),
+                ]))
+        else:
+            story.append(P(
+                "No relevant historical cases matched this reading.",
+                s["Body9"],
+            ))
+
+        story.append(P(
+            "Historical lessons only — these are not confirmed causes or "
+            "guaranteed treatments. The Master / Chief Engineer must "
+            "verify their applicability.",
+            s["BodySmall"],
+        ))
+
+    except Exception as exc:
+        story.append(P(
+            f"Historical recommendations could not be loaded: "
+            f"{escape(str(exc))}",
+            s["Body9"],
+        ))
+
+    story += [
         P("Operational caution", s["SubTitle"]),
         P("This student prototype is for demonstration and evaluation. Follow approved vessel procedures and "
           "human review; do not rely on this PDF as the sole basis for safety-critical decisions.", s["Body9"]),
-        PageBreak(),
     ]
 
     # PAGE 8 — APPENDIX AND SIGN-OFF
@@ -471,10 +612,15 @@ def build_report(reading):
         str(OUTPUT_PDF), pagesize=A4,
         rightMargin=18 * mm, leftMargin=18 * mm,
         topMargin=19 * mm, bottomMargin=19 * mm,
-        title="EcoSpillGuard 8-page Live Hardware Investigation Report",
+        title="EcoSpillGuard Live Hardware Investigation Report",
         author="EcoSpillGuard",
     )
-    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    doc.build(
+        story,
+        onFirstPage=draw_page,
+        onLaterPages=draw_page,
+        canvasmaker=NumberedCanvas,
+    )
 
 
 def main():
@@ -490,7 +636,7 @@ def main():
         build_report(reading)
         print(f"\nPDF CREATED: {OUTPUT_PDF}")
         print(f"File size: {OUTPUT_PDF.stat().st_size / 1024:.1f} KB")
-        print("The report includes eight planned sections/pages and uses the live backend reading.")
+        print("The report includes eight planned sections and uses the live backend reading.")
     except Exception as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)
