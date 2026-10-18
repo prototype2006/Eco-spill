@@ -1,16 +1,25 @@
 
 import csv
-import serial
+import json
+import os
 import time
+import urllib.request
+import urllib.error
+import serial
 
-# ESP32 serial connection
+# ============================================================
+# SETTINGS
+# ============================================================
+
 PORT = "COM5"
 BAUD_RATE = 115200
 
-# CSV file created in the current working folder
+# Local CSV backup
 CSV_FILE = "ecospill_data.csv"
 
-# Columns produced by the EcoSpillGuard ESP32 sketch
+# Your local EcoSpillGuard backend
+SERVER_URL = "http://127.0.0.1:8000/data"
+
 HEADERS = [
     "Time",
     "Distance_cm",
@@ -21,66 +30,145 @@ HEADERS = [
     "GPS"
 ]
 
-print("Connecting to EcoSpillGuard on", PORT)
 
-try:
-    # Open the ESP32 serial connection
-    with serial.Serial(PORT, BAUD_RATE, timeout=2) as esp32:
+# ============================================================
+# SEND ONE READING TO THE SERVER
+# ============================================================
 
-        # Allow the serial connection to settle
-        time.sleep(2)
+def send_to_server(row):
+    # Convert the ESP32 CSV columns into JSON fields.
+    timestamp, distance, status, led, latitude, longitude, gps = row
 
-        print("Connected! Saving sensor readings to CSV.")
-        print("Press Ctrl+C to stop logging.")
+    # INVALID is a measurement state, not proof of a spill.
+    if distance.strip().upper() == "INVALID":
+        distance_value = None
+    else:
+        try:
+            distance_value = float(distance)
+        except ValueError:
+            distance_value = None
 
-        # Create/open the CSV file
-        with open(
-            CSV_FILE,
-            "a",
-            newline="",
-            encoding="utf-8"
-        ) as file:
+    # Convert coordinates only when they contain numeric values.
+    try:
+        latitude_value = float(latitude)
+    except ValueError:
+        latitude_value = None
 
-            writer = csv.writer(file)
+    try:
+        longitude_value = float(longitude)
+    except ValueError:
+        longitude_value = None
 
-            # Add column headings only if the file is empty
-            if file.tell() == 0:
-                writer.writerow(HEADERS)
-                file.flush()
+    # The backend expects ALERT_ON or NORMAL.
+    # Do not create an incident from an invalid measurement.
+    status_value = status.strip().upper()
 
-            while True:
-                # Read one line sent by the ESP32
-                line = esp32.readline().decode(
-                    "utf-8", errors="replace"
-                ).strip()
+    if distance_value is None or status_value == "UNKNOWN":
+        status_value = "INVALID"
+    elif status_value == "ALERT":
+        status_value = "ALERT_ON"
+    elif status_value != "NORMAL":
+        status_value = "INVALID"
 
-                if not line:
-                    continue
+    payload = {
+        "timestamp": timestamp,
+        "distance_cm": distance_value,
+        "water_percent": None,  # Not calculated by the current ESP32 sketch
+        "status": status_value,
+        "led": led,
+        "latitude": latitude_value,
+        "longitude": longitude_value,
+        "gps_status": gps
+    }
 
-                # Ignore startup messages and the ESP32 header
-                if line.startswith("Time,Distance_cm"):
-                    continue
+    request = urllib.request.Request(
+        SERVER_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
 
-                # Split the CSV row received over serial
-                row = next(csv.reader([line]))
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            if response.status == 200:
+                print("SERVER OK:", status_value, distance_value)
+            else:
+                print("SERVER returned HTTP", response.status)
 
-                # Accept only the seven expected columns
-                if len(row) != len(HEADERS):
-                    print("Skipping non-data line:", line)
-                    continue
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        print("SERVER ERROR:", error)
+        print("Is ecospill_server.py running on port 8000?")
 
-                # Save the sensor reading
-                writer.writerow(row)
-                file.flush()
 
-                print("Saved:", line)
+# ============================================================
+# MAIN SERIAL LOGGER
+# ============================================================
 
-except serial.SerialException as error:
-    print("Serial connection error:", error)
-    print("Check COM5 and close Arduino Serial Monitor.")
+def main():
+    print("Connecting to EcoSpillGuard on", PORT)
+    print("Website backend:", SERVER_URL)
 
-except KeyboardInterrupt:
-    print("\nLogging stopped.")
+    try:
+        with serial.Serial(PORT, BAUD_RATE, timeout=2) as esp32:
+            # Allow ESP32 serial output to settle after connection.
+            time.sleep(2)
 
-finally:
-    print("CSV logger finished.")
+            print("Connected to ESP32!")
+            print("Saving CSV and forwarding readings to server.")
+            print("Press Ctrl+C to stop.")
+
+            with open(
+                CSV_FILE,
+                "a",
+                newline="",
+                encoding="utf-8"
+            ) as file:
+
+                writer = csv.writer(file)
+
+                # Check actual file size, not the append-mode cursor.
+                if os.path.getsize(CSV_FILE) == 0:
+                    writer.writerow(HEADERS)
+                    file.flush()
+
+                while True:
+                    line = esp32.readline().decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+
+                    if not line:
+                        continue
+
+                    # Ignore startup messages, CSV header and diagnostics.
+                    if line.startswith("Time,Distance_cm"):
+                        continue
+
+                    row = next(csv.reader([line]))
+
+                    # Only accept actual seven-column ESP32 data rows.
+                    if len(row) != len(HEADERS):
+                        print("Skipping non-data line:", line)
+                        continue
+
+                    # Save the original reading to the CSV backup.
+                    writer.writerow(row)
+                    file.flush()
+
+                    print("ESP32:", line)
+
+                    # Forward the reading to the backend.
+                    send_to_server(row)
+
+    except serial.SerialException as error:
+        print("Serial connection error:", error)
+        print("Check COM5 and close Arduino Serial Monitor.")
+
+    except KeyboardInterrupt:
+        print("\nLogging stopped.")
+
+    finally:
+        print("CSV logger finished.")
+
+
+if __name__ == "__main__":
+    main()
