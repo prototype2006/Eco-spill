@@ -16,7 +16,9 @@ Firebase incident details can be integrated later.
 from datetime import datetime
 from pathlib import Path
 import json
+import math
 import sys
+from io import BytesIO
 import urllib.error
 import urllib.request
 from xml.sax.saxutils import escape
@@ -31,7 +33,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, KeepTogether
+    PageBreak, KeepTogether, Flowable
 )
 
 API_URL = "http://127.0.0.1:8000/latest"
@@ -47,6 +49,9 @@ WARNING_BG = colors.HexColor("#FFF3D6")
 WARNING_TEXT = colors.HexColor("#805500")
 GREEN_BG = colors.HexColor("#E5F5EA")
 GREEN_TEXT = colors.HexColor("#21663A")
+OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OSM_ATTRIBUTION = "Map data (c) OpenStreetMap contributors"
+GPS_FRESHNESS_SECONDS = 10 * 60
 
 
 def fetch_live_reading():
@@ -191,6 +196,131 @@ def gps_note(gps_status, lat, lon):
             f"Backend GPS status: {display(gps_status)}. Verify the fix.")
 
 
+def _parse_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed
+
+
+def valid_incident_location(reading, now=None):
+    """Return a current GPS fix, or the reason it must not be mapped."""
+    gps_status = str(reading.get("gps_status") or "").strip().upper()
+    if not gps_status or gps_status in {"NO_FIX", "INVALID", "UNKNOWN", "WAITING"}:
+        return None, "Location unavailable — valid current GPS fix not obtained"
+
+    try:
+        lat = float(reading.get("latitude"))
+        lon = float(reading.get("longitude"))
+    except (TypeError, ValueError):
+        return None, "Location unavailable — valid current GPS fix not obtained"
+
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return None, "Location unavailable — valid current GPS fix not obtained"
+    if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return None, "Location unavailable — valid current GPS fix not obtained"
+
+    received_at = _parse_datetime(reading.get("received_at"))
+    if received_at is None:
+        return None, "Location unavailable — current GPS reading time is unavailable"
+    current_time = now or datetime.now().astimezone()
+    age = (current_time - received_at).total_seconds()
+    if age < 0 or age > GPS_FRESHNESS_SECONDS:
+        return None, "Location unavailable — valid current GPS fix is stale"
+
+    return (lat, lon), None
+
+
+def _tile_coordinates(latitude, longitude, zoom):
+    n = 2 ** zoom
+    x = (longitude + 180) / 360 * n
+    latitude_rad = math.radians(latitude)
+    y = (
+        1 - math.asinh(math.tan(latitude_rad)) / math.pi
+    ) / 2 * n
+    return x, y
+
+
+class OSMMap(Flowable):
+    """Render downloaded OSM tiles and a marker as one embedded report element."""
+
+    def __init__(self, latitude, longitude, tile_data, width, height, zoom=15):
+        Flowable.__init__(self)
+        self.latitude = latitude
+        self.longitude = longitude
+        self.tile_data = tile_data
+        self.zoom = zoom
+        self.width = width
+        self.height = height
+
+    def wrap(self, available_width, available_height):
+        return min(self.width, available_width), min(self.height, available_height)
+
+    def draw(self):
+        canvas = self.canv
+        tile_size = 256
+        scale = min(self.width / (3 * tile_size), self.height / (3 * tile_size))
+        image_size = tile_size * scale
+        x_center, y_center = _tile_coordinates(
+            self.latitude, self.longitude, self.zoom
+        )
+        center_x = math.floor(x_center)
+        center_y = math.floor(y_center)
+        canvas.saveState()
+        for (tile_x, tile_y), data in self.tile_data.items():
+            column = tile_x - center_x + 1
+            row_from_top = tile_y - center_y + 1
+            canvas.drawImage(
+                ImageReader(BytesIO(data)),
+                column * image_size,
+                self.height - (row_from_top + 1) * image_size,
+                width=image_size,
+                height=image_size,
+                mask="auto",
+            )
+
+        marker_x = (x_center - (center_x - 1)) * image_size
+        marker_y = self.height - (y_center - (center_y - 1)) * image_size
+        canvas.setFillColor(colors.HexColor("#D83A3A"))
+        canvas.setStrokeColor(colors.white)
+        canvas.setLineWidth(1.2)
+        canvas.circle(marker_x, marker_y, 5, fill=1, stroke=1)
+        canvas.setFillColor(colors.white)
+        canvas.circle(marker_x, marker_y, 1.5, fill=1, stroke=0)
+        canvas.restoreState()
+
+
+def fetch_osm_map(latitude, longitude, width, height, zoom=15):
+    """Download a small current OSM tile mosaic for the supplied GPS fix."""
+    x_center, y_center = _tile_coordinates(latitude, longitude, zoom)
+    center_x = math.floor(x_center)
+    center_y = math.floor(y_center)
+    tile_data = {}
+    for tile_x in range(center_x - 1, center_x + 2):
+        for tile_y in range(center_y - 1, center_y + 2):
+            url = OSM_TILE_URL.format(z=zoom, x=tile_x, y=tile_y)
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "image/png",
+                    "User-Agent": "EcoSpillGuard-Report/1.0 (educational project)",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = response.read()
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise RuntimeError("OpenStreetMap returned a non-PNG tile.")
+            tile_data[(tile_x, tile_y)] = data
+    return OSMMap(
+        latitude, longitude, tile_data, width=width, height=height, zoom=zoom
+    )
+
+
 
 class NumberedCanvas(Canvas):
     """Canvas that adds the real total page count after the story is laid out."""
@@ -293,6 +423,21 @@ def build_report(reading):
     lat = reading.get("latitude")
     lon = reading.get("longitude")
     gps = reading.get("gps_status")
+    location, location_error = valid_incident_location(reading)
+    map_flowable = None
+    map_error = None
+    if location:
+        page_width = A4[0] - (18 + 18) * mm
+        page_height = A4[1] - (19 + 19) * mm
+        reserved_height = (24 + 4 + 15 + 13) * mm
+        map_width = page_width
+        map_height = min(map_width, page_height - reserved_height)
+        try:
+            map_flowable = fetch_osm_map(
+                *location, width=map_width, height=map_height
+            )
+        except (OSError, RuntimeError, urllib.error.URLError) as exc:
+            map_error = f"Map image could not be retrieved: {exc}"
 
     warnings = []
     if distance is None:
@@ -369,7 +514,45 @@ def build_report(reading):
           + display(status) + ", but a normal status is not a substitute for the project's complete "
           "leak-detection logic or a physical inspection.", s["Body9"]),
         PageBreak(),
+        P("Incident Location", s["SectionTitle"]),
     ]
+    if location and map_flowable:
+        story.append(KeepTogether([
+            map_flowable,
+            Spacer(1, 2 * mm),
+            P(
+                f"Latitude: {location[0]:.6f} | Longitude: {location[1]:.6f}",
+                s["Body9"],
+            ),
+            P(
+                f"{OSM_ATTRIBUTION}. Map tiles were requested at report-generation time "
+                "from tile.openstreetmap.org; no API key or paid mapping service is used.",
+                s["BodySmall"],
+            ),
+        ]))
+    elif location:
+        story += [
+            P("Current GPS fix validated.", s["Body9"]),
+            P(
+                f"Latitude: {location[0]:.6f} | Longitude: {location[1]:.6f}",
+                s["Body9"],
+            ),
+            P(map_error or "Map image unavailable.", s["Warning"]),
+            P(
+                f"{OSM_ATTRIBUTION}. The map request failed, so no map image was embedded.",
+                s["BodySmall"],
+            ),
+        ]
+    else:
+        story += [
+            P(location_error, s["Warning"]),
+            P(
+                "No map image is embedded because the backend did not provide a fresh, "
+                "valid GPS fix.",
+                s["Body9"],
+            ),
+        ]
+    story.append(PageBreak())
 
     # PAGE 3 — HARDWARE AND DATA FLOW
     story += [
