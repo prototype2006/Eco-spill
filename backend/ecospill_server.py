@@ -51,7 +51,7 @@ ensure_csv_file(
 
 ensure_csv_file(
     INCIDENTS_FILE,
-    ["incident_id", "started_at", "ended_at", "last_status"]
+    ["incident_id", "start_time", "end_time", "status", "readings_saved"]
 )
 
 ensure_csv_file(
@@ -172,9 +172,11 @@ def get_incident_history():
                     "sensor_readings": [],
                 })
 
-                start = (row.get("start_time") or "").strip()
-                end = (row.get("end_time") or "").strip()
-                row_status = (row.get("status") or "").strip().upper()
+                start = (row.get("start_time") or row.get("started_at") or "").strip()
+                end = (row.get("end_time") or row.get("ended_at") or "").strip()
+                row_status = (
+                    row.get("status") or row.get("last_status") or ""
+                ).strip().upper()
 
                 if start and (
                     not item["start_time"] or start < item["start_time"]
@@ -446,8 +448,7 @@ class EcoSpillHandler(BaseHTTPRequestHandler):
 
         elif path == "/incidents":
             # Sensor-only history; crew investigation and report data live in Firebase.
-            with data_lock:
-                incidents = get_incident_history()
+            incidents = get_incident_history()
 
             self.send_json({
                 "status": "ok",
