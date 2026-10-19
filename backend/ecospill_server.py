@@ -152,6 +152,123 @@ def process_reading(data):
     return reading
 
 
+def get_incident_history():
+    """Return historical sensor incidents with their original SPILL IDs."""
+    incidents = {}
+
+    # The CSV has one row when an incident starts and another when it closes.
+    if os.path.exists(INCIDENTS_FILE):
+        with open(INCIDENTS_FILE, "r", newline="", encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                key = (row.get("incident_id") or "").strip()
+                if not key:
+                    continue
+
+                item = incidents.setdefault(key, {
+                    "incident_id": key,
+                    "start_time": None,
+                    "end_time": None,
+                    "status": "OPEN",
+                    "sensor_readings": [],
+                })
+
+                start = (row.get("start_time") or "").strip()
+                end = (row.get("end_time") or "").strip()
+                row_status = (row.get("status") or "").strip().upper()
+
+                if start and (
+                    not item["start_time"] or start < item["start_time"]
+                ):
+                    item["start_time"] = start
+
+                if end and (
+                    not item["end_time"] or end > item["end_time"]
+                ):
+                    item["end_time"] = end
+
+                if end or row_status == "NORMAL":
+                    item["status"] = "CLOSED"
+                elif row_status in ("ALERT_ON", "ALERT"):
+                    item["status"] = "OPEN"
+
+    # Attach the sensor readings belonging to each incident.
+    if os.path.exists(ALERT_READINGS_FILE):
+        with open(ALERT_READINGS_FILE, "r", newline="", encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                key = (row.get("incident_id") or "").strip()
+                if not key:
+                    continue
+
+                item = incidents.setdefault(key, {
+                    "incident_id": key,
+                    "start_time": None,
+                    "end_time": None,
+                    "status": "CLOSED",
+                    "sensor_readings": [],
+                })
+
+                distance = row.get("distance_cm")
+                try:
+                    distance = float(distance) if distance not in (None, "") else None
+                except (TypeError, ValueError):
+                    distance = None
+
+                latitude = row.get("latitude")
+                longitude = row.get("longitude")
+                try:
+                    latitude = float(latitude) if latitude not in (None, "") else None
+                except (TypeError, ValueError):
+                    latitude = None
+                try:
+                    longitude = float(longitude) if longitude not in (None, "") else None
+                except (TypeError, ValueError):
+                    longitude = None
+
+                item["sensor_readings"].append({
+                    "received_at": row.get("received_at"),
+                    "timestamp": row.get("timestamp"),
+                    "distance_cm": distance,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "status": row.get("status"),
+                })
+
+    with data_lock:
+        if active_incident and incident_id in incidents:
+            incidents[incident_id]["status"] = "OPEN"
+
+    results = list(incidents.values())
+    for item in results:
+        item["sensor_readings"].sort(
+            key=lambda reading: (
+                reading.get("received_at") or "",
+                reading.get("timestamp") or "",
+            )
+        )
+        item["readings_saved"] = len(item["sensor_readings"])
+        item["location"] = next(
+            (
+                {
+                    "latitude": reading["latitude"],
+                    "longitude": reading["longitude"],
+                }
+                for reading in reversed(item["sensor_readings"])
+                if reading.get("latitude") is not None
+                and reading.get("longitude") is not None
+            ),
+            {"latitude": None, "longitude": None},
+        )
+        item["latest_reading"] = (
+            item["sensor_readings"][-1] if item["sensor_readings"] else None
+        )
+
+    results.sort(
+        key=lambda item: item.get("start_time") or "",
+        reverse=True,
+    )
+    return results
+
+
 # This is the webpage that refreshes automatically.
 DASHBOARD_HTML = r"""
 <!DOCTYPE html>
@@ -327,6 +444,16 @@ class EcoSpillHandler(BaseHTTPRequestHandler):
                 "reading": reading
             })
 
+        elif path == "/incidents":
+            # Sensor-only history; crew investigation and report data live in Firebase.
+            with data_lock:
+                incidents = get_incident_history()
+
+            self.send_json({
+                "status": "ok",
+                "count": len(incidents),
+                "incidents": incidents,
+            })
 
         else:
             self.send_json({"error": "Not found"}, 404)
