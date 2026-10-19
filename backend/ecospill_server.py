@@ -312,10 +312,21 @@ class EcoSpillHandler(BaseHTTPRequestHandler):
         elif path == "/health":
             self.send_json({"status": "ok"})
 
+        
         elif path == "/latest":
             with data_lock:
                 reading = latest_reading.copy()
-            self.send_json({"status": "ok", "reading": reading})
+
+                # Include the current incident ID in the response.
+                reading["incident_id"] = (
+                    incident_id if active_incident else None
+                )
+
+            self.send_json({
+                "status": "ok",
+                "reading": reading
+            })
+
 
         else:
             self.send_json({"error": "Not found"}, 404)
