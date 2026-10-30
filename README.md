@@ -421,8 +421,8 @@ Add the project contributors and their verified GitHub profiles here.
 
 | Contributor | Responsibility |
 |---|---|
-| Crystal D'Souza | System architecture, hardware design, component selection, and integration planning. |
-| Other team members | Add verified names and assigned responsibilities. |
+| Crystal D'souza | System architecture, hardware design, component selection, and integration planning. |
+| Blossom Fernandes | Machine learning development, dataset preparation, AI image analysis, hardware development, and component integration. |
 
 ## 📜 License
 
