@@ -434,7 +434,7 @@ Relevant reference categories include:
 
 EcoSpill is developed as an academic project involving embedded systems, hardware design, software development, AI integration, and technical documentation.
 
-Add the project contributors and their verified GitHub profiles here.
+
 
 | Contributor | Responsibility |
 |---|---|
