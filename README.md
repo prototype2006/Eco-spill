@@ -1,5 +1,5 @@
 # EcoSpill 🌊
-### AI-Powered Oil Spill Monitoring and Detection System for Ships
+### AI-Assisted Oil Spill Incident Reporting and Documentation System for Ships
 
 EcoSpill is an AI-assisted oil spill monitoring system designed to detect potential oil leakage, capture visual evidence, record incident timestamps and geographical coordinates, and support automated incident report generation.
 
