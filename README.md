@@ -399,7 +399,6 @@ Potential future improvements include:
 
 ## 📚 Research and References
 
-Research and technical documentation should support the design and evaluation of EcoSpill.
 
 Relevant reference categories include:
 
@@ -411,7 +410,25 @@ Relevant reference categories include:
 - Maritime oil pollution monitoring and incident response guidance.
 - Documentation for the software frameworks and external APIs used.
 
-Add the exact papers, datasets, and official documentation consulted by the team. Each reference should include sufficient bibliographic information or a direct URL to be independently verified.
+[1] Espressif Systems, “ESP32 Series Datasheet and Technical Documentation.” [Online]. Available: https://www.espressif.com/en/support/documents/technical-documents
+
+[2] Espressif Systems, “ESP32 Camera Driver.” GitHub repository. [Online]. Available: https://github.com/espressif/esp32-camera
+
+[3] Analog Devices, “DS3231: Extremely Accurate I²C-Integrated RTC/TCXO/Crystal.” [Online]. Available: https://www.analog.com/en/products/ds3231.html
+
+[4] u-blox, “NEO-6 Series: Versatile u-blox 6 GPS Modules.” [Online]. Available: https://www.u-blox.com/en/product/neo-6-series
+
+[5] Vishay Semiconductors, “TCRT5000, TCRT5000L: Reflective Optical Sensor with Transistor Output.” [Online]. Available: https://www.vishay.com/docs/83760/tcrt5000.pdf
+
+[6] “A Two-Stage Oil Spill Detection Method Based on an Improved Superpixel Module and DeepLab V3+ Using SAR Images,” IEEE Geoscience and Remote Sensing Letters, vol. 22, article 4000505, Nov. 2024. doi: 10.1109/LGRS.2024.3508020.
+
+[7] “A Survey on Oil Spill Detection using SAR images in Machine Learning,” in Proc. Parul International Conference on Engineering and Technology (PICET), 2024. doi: 10.1109/PICET60765.2024.10716148.
+
+[8] Espressif Systems, “Arduino-ESP32 Documentation.” [Online]. Available: https://docs.espressif.com/projects/arduino-esp32/en/latest/
+
+[9] Groq, “Groq API Reference.” [Online]. Available: https://console.groq.com/docs/api-reference
+
+[10] Streamlit, “Streamlit Documentation.” [Online]. Available: https://docs.streamlit.io/
 
 ## 👥 Contributors
 
@@ -425,10 +442,6 @@ Add the project contributors and their verified GitHub profiles here.
 | Blossom Fernandes | Machine learning development, dataset preparation, AI image analysis, hardware development, and component integration. |
 
 ## 📜 License
-
-Choose and add an appropriate open-source license before distributing the project for reuse.
-
-If no license has been added, all rights remain with the applicable copyright holders by default. Do not assume that a public GitHub repository automatically grants permission to reuse its code, datasets, or other assets.
 
 ---
 
