@@ -3,8 +3,13 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from core.data_interface import get_latest_reading
+from modules.incident_history import show_incident_history
 
-
+from modules.vessel_management import (
+    register_vessel,
+    list_company_vessels,
+)
+from backend.authorization import AuthorizationError
 # =========================================================
 # PAGE CONFIGURATION
 # =========================================================
@@ -29,6 +34,12 @@ except (KeyError, FileNotFoundError):
         "Check .streamlit/secrets.toml."
     )
     st.stop()
+
+FIREBASE_SIGN_UP_URL = (
+    "https://identitytoolkit.googleapis.com/v1/"
+    "accounts:signUp"
+    f"?key={API_KEY}"
+)
 
 FIREBASE_SIGN_IN_URL = (
     "https://identitytoolkit.googleapis.com/v1/"
@@ -247,6 +258,44 @@ def firebase_sign_in(email: str, password: str):
         )
 
 
+def firebase_create_account(email: str, password: str):
+    """Create a Firebase email/password account."""
+    try:
+        response = requests.post(
+            FIREBASE_SIGN_UP_URL,
+            json={
+                "email": email.strip(),
+                "password": password,
+                "returnSecureToken": True,
+            },
+            timeout=15,
+        )
+
+        try:
+            result = response.json()
+        except ValueError:
+            return None, "Firebase returned an invalid response."
+
+        if response.ok:
+            return result, None
+
+        error_code = result.get("error", {}).get("message", "")
+        messages = {
+            "EMAIL_EXISTS": "An account already exists for this email. Sign in instead.",
+            "INVALID_EMAIL": "Enter a valid email address.",
+            "WEAK_PASSWORD": "Choose a stronger password with at least 6 characters.",
+            "OPERATION_NOT_ALLOWED": "Email/password authentication is not enabled in Firebase.",
+            "API_KEY_INVALID": "The Firebase API key is invalid. Check your configuration.",
+            "TOO_MANY_ATTEMPTS_TRY_LATER": "Too many attempts. Please wait and try again.",
+        }
+        return None, messages.get(
+            error_code,
+            "Account creation failed. Check the details and Firebase settings.",
+        )
+    except requests.RequestException:
+        return None, "Could not reach Firebase. Check your internet connection."
+
+
 # =========================================================
 # SESSION STATE
 # =========================================================
@@ -271,6 +320,13 @@ if st.session_state.user:
         st.caption(st.session_state.user["email"])
         st.divider()
 
+        selected_page = st.radio(
+            "Navigation",
+            ["Dashboard", "Incident History", "Vessel Management"],
+            key="main_navigation",
+        )
+        st.divider()
+
         if st.button("Sign out", use_container_width=True):
             st.session_state.user = None
             st.session_state.firebase_token = None
@@ -279,140 +335,271 @@ if st.session_state.user:
         st.divider()
         st.caption("Development preview")
 
-    # Dashboard header
-    st.title("Marine Monitoring Dashboard")
-    st.caption("EcoSpillGuard · Sensor Monitoring")
+    if selected_page == "Incident History":
+        show_incident_history()
 
-    st.info(
-        "Sensor readings are retrieved from Blossom's local HTTP server. "
-        "Values marked N/A are not currently available."
-    )
+    elif selected_page == "Vessel Management":
+        st.title("Vessel Management")
+        st.caption("Register and manage vessels for your company.")
 
-    # Refresh the dashboard every five seconds.
-    st_autorefresh(
-        interval=5000,
-        limit=None,
-        key="sensor_refresh",
-    )
+        token = st.session_state.get("firebase_token")
 
-    # Fetch latest reading
-    result = get_latest_reading()
-    reading = result.get("reading")
-    connected = result.get("connected", False)
+        if not token:
+            st.error("Please sign in again to manage vessels.")
+            st.stop()
 
-    # Connection error handling
-    if not connected:
-        st.error(
-            result.get(
-                "error",
-                "The sensor server is currently unavailable.",
+        st.subheader("Register a vessel")
+
+        with st.form("register_vessel_form"):
+            vessel_name = st.text_input(
+                "Vessel name *",
+                placeholder="e.g. Ocean Explorer",
             )
-        )
-        st.caption(
-            "Check that Blossom's Python server is running and that "
-            "both computers can access the same local network."
-        )
+            imo_number = st.text_input(
+                "IMO number",
+                placeholder="Optional",
+            )
+            call_sign = st.text_input(
+                "Call sign",
+                placeholder="Optional",
+            )
+            vessel_type = st.selectbox(
+                "Vessel type",
+                [
+                    "Not specified",
+                    "Cargo",
+                    "Tanker",
+                    "Container ship",
+                    "Passenger",
+                    "Fishing",
+                    "Research",
+                    "Other",
+                ],
+            )
+            flag_state = st.text_input(
+                "Flag state",
+                placeholder="e.g. India",
+            )
+            device_id = st.text_input(
+                "Sensor device ID",
+                placeholder="Optional, if a device is assigned",
+            )
 
-    elif reading is None:
-        st.warning(
-            "The server responded, but no valid reading object was returned."
-        )
+            submitted = st.form_submit_button(
+                "Register vessel",
+                type="primary",
+            )
+
+        if submitted:
+            if not vessel_name.strip():
+                st.error("Vessel name is required.")
+            else:
+                try:
+                    vessel = register_vessel(
+                        id_token=token,
+                        name=vessel_name.strip(),
+                        imo_number=imo_number.strip() or None,
+                        call_sign=call_sign.strip() or None,
+                        vessel_type=(
+                            None
+                            if vessel_type == "Not specified"
+                            else vessel_type
+                        ),
+                        flag_state=flag_state.strip() or None,
+                        device_id=device_id.strip() or None,
+                    )
+
+                    st.success(
+                        f"Vessel registered: {vessel['vessel_id']}"
+                    )
+                    st.rerun()
+
+                
+                except AuthorizationError as exc:
+                    import logging
+                    logging.exception("Vessel registration authorization failed")
+                    st.error(f"Authorization error: {exc}")
+
+                except (ValueError, RuntimeError) as exc:
+                    import logging
+                    logging.exception("Vessel registration failed")
+                    st.error(f"Registration error: {type(exc).__name__}: {exc}")
+
+                except Exception as exc:
+                    import logging
+                    logging.exception("Vessel registration failed")
+                    st.error(f"Registration error: {type(exc).__name__}: {exc}")
+
+
+        st.divider()
+        st.subheader("Registered vessels")
+
+        try:
+            vessels = list_company_vessels(id_token=token)
+        except AuthorizationError as exc:
+            import logging
+            logging.exception("Vessel list authorization failed")
+            st.error(f"Authorization error loading vessels: {exc}")
+
+        except Exception as exc:
+            import logging
+            logging.exception("Vessel list loading failed")
+            st.error(f"Vessel loading error: {type(exc).__name__}: {exc}")
+        else:
+            if not vessels:
+                st.info("No vessels have been registered for your company yet.")
+            else:
+                for vessel in vessels:
+                    with st.container(border=True):
+                        st.markdown(f"**{vessel.get('name', 'Unnamed vessel')}**")
+                        st.caption(
+                            f"Vessel ID: {vessel.get('vessel_id', 'N/A')}"
+                        )
+                        st.write(
+                            f"Status: {vessel.get('status', 'Unknown')}"
+                        )
+                        if vessel.get("imo_number"):
+                            st.write(
+                                f"IMO number: {vessel['imo_number']}"
+                            )
+                        if vessel.get("device_id"):
+                            st.write(
+                                f"Sensor device: {vessel['device_id']}"
+                            )
 
     else:
-        st.success("Sensor server reachable")
+        # Dashboard header
+        st.title("Marine Monitoring Dashboard")
+        st.caption("EcoSpillGuard · Sensor Monitoring")
 
-        sensor_status = reading.get("status", "UNKNOWN")
-        distance = reading.get("distance_cm")
-        water = reading.get("water_percent")
-        led = reading.get("led", "Unknown")
-        gps_status = reading.get("gps_status", "Unknown")
-        timestamp = reading.get("timestamp", "Unknown")
-
-        if sensor_status == "INVALID":
-            st.warning(
-                "The server is reachable, but the latest sensor reading "
-                "is marked INVALID. Check the sensor and hardware output."
-            )
-
-        # Metrics
-        col1, col2, col3 = st.columns(3)
-
-        col1.metric(
-            "Distance",
-            f"{distance} cm" if distance is not None else "N/A",
+        st.info(
+            "Sensor readings are retrieved from Blossom's local HTTP server. "
+            "Values marked N/A are not currently available."
         )
-        col2.metric(
-            "Water reading",
-            f"{water}%" if water is not None else "N/A",
+
+        # Refresh the dashboard every five seconds.
+        st_autorefresh(
+            interval=5000,
+            limit=None,
+            key="sensor_refresh",
         )
-        col3.metric("Sensor status", str(sensor_status))
 
-        # Sensor details
-        st.subheader("Sensor Details")
-        detail1, detail2, detail3 = st.columns(3)
+        # Fetch latest reading
+        result = get_latest_reading()
+        reading = result.get("reading")
+        connected = result.get("connected", False)
 
-        with detail1:
-            st.markdown("**LED status**")
-            st.write(led)
-
-        with detail2:
-            st.markdown("**GPS status**")
-            st.write(gps_status)
-
-        with detail3:
-            st.markdown("**Sensor timestamp**")
-            st.write(timestamp)
-
-        # GPS coordinates
-        latitude = reading.get("latitude")
-        longitude = reading.get("longitude")
-
-        st.subheader("Location")
-        if latitude is not None and longitude is not None:
-            st.write(f"Latitude: {latitude}")
-            st.write(f"Longitude: {longitude}")
-        else:
-            st.info(
-                "GPS coordinates are unavailable. "
-                "The device may not have acquired a GPS fix."
+        # Connection error handling
+        if not connected:
+            st.error(
+                result.get(
+                    "error",
+                    "The sensor server is currently unavailable.",
+                )
+            )
+            st.caption(
+                "Check that Blossom's Python server is running and that "
+                "both computers can access the same local network."
             )
 
-        # Honest interpretation of sensor state
-        if sensor_status != "NORMAL":
+        elif reading is None:
             st.warning(
-                "The sensor is not reporting NORMAL status. "
-                "No oil-spill conclusion can be made from this reading alone."
+                "The server responded, but no valid reading object was returned."
             )
+
         else:
-            st.info(
-                "The sensor reports NORMAL status. This does not independently "
-                "confirm that the water is free of oil. ML detection has not "
-                "been integrated yet."
+            st.success("Sensor server reachable")
+
+            sensor_status = reading.get("status", "UNKNOWN")
+            distance = reading.get("distance_cm")
+            water = reading.get("water_percent")
+            led = reading.get("led", "Unknown")
+            gps_status = reading.get("gps_status", "Unknown")
+            timestamp = reading.get("timestamp", "Unknown")
+
+            if sensor_status == "INVALID":
+                st.warning(
+                    "The server is reachable, but the latest sensor reading "
+                    "is marked INVALID. Check the sensor and hardware output."
+                )
+
+            # Metrics
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Distance",
+                f"{distance} cm" if distance is not None else "N/A",
             )
+            col2.metric(
+                "Water reading",
+                f"{water}%" if water is not None else "N/A",
+            )
+            col3.metric("Sensor status", str(sensor_status))
 
-    # Future modules
-    st.divider()
-    st.subheader("Other Monitoring Modules")
-    module1, module2, module3 = st.columns(3)
+            # Sensor details
+            st.subheader("Sensor Details")
+            detail1, detail2, detail3 = st.columns(3)
 
-    with module1:
-        st.markdown("**AI Detection**")
-        st.caption("Pending ML model integration")
+            with detail1:
+                st.markdown("**LED status**")
+                st.write(led)
 
-    with module2:
-        st.markdown("**Incident History**")
-        st.caption("Historical incident storage not connected yet")
+            with detail2:
+                st.markdown("**GPS status**")
+                st.write(gps_status)
 
-    with module3:
-        st.markdown("**Reports**")
-        st.caption("Report generation not connected yet")
+            with detail3:
+                st.markdown("**Sensor timestamp**")
+                st.write(timestamp)
 
+            # GPS coordinates
+            latitude = reading.get("latitude")
+            longitude = reading.get("longitude")
 
-# =========================================================
-# LOGIN PAGE
-# =========================================================
+            st.subheader("Location")
+            if latitude is not None and longitude is not None:
+                st.write(f"Latitude: {latitude}")
+                st.write(f"Longitude: {longitude}")
+            else:
+                st.info(
+                    "GPS coordinates are unavailable. "
+                    "The device may not have acquired a GPS fix."
+                )
+
+            # Honest interpretation of sensor state
+            if sensor_status != "NORMAL":
+                st.warning(
+                    "The sensor is not reporting NORMAL status. "
+                    "No oil-spill conclusion can be made from this reading alone."
+                )
+            else:
+                st.info(
+                    "The sensor reports NORMAL status. This does not independently "
+                    "confirm that the water is free of oil. ML detection has not "
+                    "been integrated yet."
+                )
+
+        # Future modules
+        st.divider()
+        st.subheader("Other Monitoring Modules")
+        module1, module2, module3 = st.columns(3)
+
+        with module1:
+            st.markdown("**AI Detection**")
+            st.caption("Pending ML model integration")
+
+        with module2:
+            st.markdown("**Incident History**")
+            st.caption("Historical incident storage not connected yet")
+
+        with module3:
+            st.markdown("**Reports**")
+            st.caption("Report generation not connected yet")
 
 else:
+    # =========================================================
+    # LOGIN PAGE
+    # =========================================================
     st.markdown(
         '<div class="brand">ECO<span>SPILL</span>GUARD</div>',
         unsafe_allow_html=True,
@@ -438,81 +625,119 @@ else:
                     and support faster environmental response.
                 </div>
                 <br>
-                <div class="feature">
-                    <span>✦</span>
-                    Sensor monitoring and incident tracking
-                </div>
-                <div class="feature">
-                    <span>✦</span>
-                    AI-assisted image analysis
-                </div>
-                <div class="feature">
-                    <span>✦</span>
-                    Location-aware incident reporting
-                </div>
-                <div class="footer-note">
-                    ENVIRONMENTAL MONITORING · RESPONSIBLE RESPONSE
-                </div>
+                <div class="feature"><span>✦</span>Sensor monitoring and incident tracking</div>
+                <div class="feature"><span>✦</span>AI-assisted image analysis</div>
+                <div class="feature"><span>✦</span>Location-aware incident reporting</div>
+                <div class="footer-note">ENVIRONMENTAL MONITORING · RESPONSIBLE RESPONSE</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # Login form
+    # Sign-in and registration forms
     with right:
-        st.markdown(
-            "<div style='height:35px'></div>",
-            unsafe_allow_html=True,
-        )
-
+        st.markdown("<div style='height:35px'></div>", unsafe_allow_html=True)
         with st.container(border=True):
-            st.markdown(
-                """
-                <div class="login-heading">Welcome back</div>
-                <div class="login-subtitle">
-                    Sign in to access your monitoring workspace.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            sign_in_tab, create_tab = st.tabs(["Sign In", "Create Account"])
 
-            with st.form("login_form"):
-                email = st.text_input(
-                    "Email address",
-                    placeholder="name@organisation.com",
+            with sign_in_tab:
+                st.markdown(
+                    """
+                    <div class="login-heading">Welcome back</div>
+                    <div class="login-subtitle">Sign in to access your monitoring workspace.</div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-                password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Enter your password",
-                )
-                submitted = st.form_submit_button(
-                    "Sign in →",
-                    use_container_width=True,
-                )
+                with st.form("login_form"):
+                    login_email = st.text_input(
+                        "Email address",
+                        placeholder="name@organisation.com",
+                        key="login_email",
+                    )
+                    login_password = st.text_input(
+                        "Password",
+                        type="password",
+                        placeholder="Enter your password",
+                        key="login_password",
+                    )
+                    login_submitted = st.form_submit_button(
+                        "Sign in →",
+                        use_container_width=True,
+                    )
 
-            if submitted:
-                if not email.strip() or not password:
-                    st.error("Enter both your email and password.")
-                else:
-                    with st.spinner("Signing in securely..."):
-                        user, error = firebase_sign_in(email, password)
-
-                    if error:
-                        st.error(error)
+                if login_submitted:
+                    if not login_email.strip() or not login_password:
+                        st.error("Enter both your email and password.")
                     else:
-                        st.session_state.user = {
-                            "email": user["email"],
-                            "local_id": user["localId"],
-                        }
-                        st.session_state.firebase_token = user["idToken"]
-                        st.rerun()
+                        with st.spinner("Signing in securely..."):
+                            user, error = firebase_sign_in(login_email, login_password)
+                        if error:
+                            st.error(error)
+                        else:
+                            st.session_state.user = {
+                                "email": user["email"],
+                                "local_id": user["localId"],
+                            }
+                            st.session_state.firebase_token = user["idToken"]
+                            st.rerun()
+
+            with create_tab:
+                st.markdown(
+                    """
+                    <div class="login-heading">Join EcoSpill</div>
+                    <div class="login-subtitle">Create an account for your monitoring workspace.</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                with st.form("create_account_form"):
+                    signup_email = st.text_input(
+                        "Email address",
+                        placeholder="name@organisation.com",
+                        key="signup_email",
+                    )
+                    signup_password = st.text_input(
+                        "Create password",
+                        type="password",
+                        placeholder="At least 6 characters",
+                        key="signup_password",
+                    )
+                    confirm_password = st.text_input(
+                        "Confirm password",
+                        type="password",
+                        placeholder="Re-enter your password",
+                        key="confirm_password",
+                    )
+                    signup_submitted = st.form_submit_button(
+                        "Create account →",
+                        use_container_width=True,
+                    )
+
+                if signup_submitted:
+                    if not signup_email.strip() or not signup_password or not confirm_password:
+                        st.error("Complete all fields to create your account.")
+                    elif len(signup_password) < 6:
+                        st.error("Your password must contain at least 6 characters.")
+                    elif signup_password != confirm_password:
+                        st.error("The passwords do not match.")
+                    else:
+                        with st.spinner("Creating your secure account..."):
+                            user, error = firebase_create_account(signup_email, signup_password)
+                        if error:
+                            st.error(error)
+                        else:
+                            st.session_state.user = {
+                                "email": user["email"],
+                                "local_id": user["localId"],
+                            }
+                            st.session_state.firebase_token = user["idToken"]
+                            st.success("Account created. Your Firebase UID is ready.")
+                            st.rerun()
 
             st.markdown(
                 """
                 <div class="security-note">
                     <strong>SECURE WORKSPACE</strong><br>
-                    Sign-in is verified through Firebase Authentication.
+                    Accounts are managed through Firebase Authentication.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -520,8 +745,7 @@ else:
 
     st.markdown(
         """
-        <div style="text-align:center;color:#647e8d;
-        font-size:11px;padding-top:22px">
+        <div style="text-align:center;color:#647e8d;font-size:11px;padding-top:22px">
             ECOSPILLGUARD · DEVELOPMENT PREVIEW
         </div>
         """,

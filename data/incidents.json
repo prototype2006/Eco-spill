@@ -1,0 +1,44 @@
+[
+  {
+    "incident_id": "ESG-83AD405570",
+    "created_at": "2026-10-18T00:05:54.833229+00:00",
+    "updated_at": "2026-10-18T00:05:54.833229+00:00",
+    "vessel": {
+      "name": "Test Vessel",
+      "domain": null,
+      "vessel_id": null,
+      "vessel_type": null
+    },
+    "incident": {
+      "description": "Test incident",
+      "status": "suspected",
+      "detection_time": null,
+      "oil_type": null,
+      "tank_id": null,
+      "estimated_quantity": null
+    },
+    "location": {
+      "latitude": null,
+      "longitude": null
+    },
+    "sensor_readings": [],
+    "evidence": [],
+    "crew_investigation": {
+      "cause_category": null,
+      "cause_confirmation": "unconfirmed",
+      "chief_engineer_comments": null,
+      "actions_taken": [],
+      "crew_acknowledgement": null,
+      "follow_up_observations": null
+    },
+    "ml_analysis": {
+      "matched_historical_cases": [],
+      "recommendations": [],
+      "model_version": null
+    },
+    "report": {
+      "status": "not_generated",
+      "pdf_url": null
+    }
+  }
+]
