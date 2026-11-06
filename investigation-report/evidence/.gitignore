@@ -1,0 +1,6 @@
+# Keep actual incident images and their metadata local.
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.json
