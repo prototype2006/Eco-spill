@@ -33,11 +33,14 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, KeepTogether, Flowable
+    PageBreak, KeepTogether, Flowable, Image as ReportImage
 )
 
 API_URL = "http://127.0.0.1:8000/latest"
-OUTPUT_PDF = Path(__file__).resolve().parent / "EcoSpillGuard_Investigation_Report.pdf"
+REPORT_DIR = Path(__file__).resolve().parent
+EVIDENCE_DIR = REPORT_DIR / "evidence"
+OUTPUT_PDF = REPORT_DIR / "EcoSpillGuard_Investigation_Report.pdf"
+SUPPORTED_EVIDENCE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 NAVY = colors.HexColor("#12304A")
 BLUE = colors.HexColor("#1E6A8D")
@@ -82,6 +85,57 @@ def display(value, missing="Unavailable"):
     if value is None or value == "":
         return missing
     return str(value)
+
+
+def load_latest_camera_evidence():
+    """
+    Load the newest local camera image from investigation-report/evidence.
+
+    Optional metadata can be stored in a JSON sidecar with the same filename,
+    for example frame_001.jpg and frame_001.json. The file modification time
+    is used only to select the newest file; it is not presented as capture time.
+    """
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+
+    candidates = [
+        path for path in EVIDENCE_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EVIDENCE_EXTENSIONS
+    ]
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+
+    for image_path in candidates:
+        try:
+            image = ReportImage(str(image_path), hAlign="CENTER")
+            max_width = 150 * mm
+            max_height = 67 * mm
+            scale = min(
+                max_width / image.imageWidth,
+                max_height / image.imageHeight,
+                1.0,
+            )
+            image.drawWidth = image.imageWidth * scale
+            image.drawHeight = image.imageHeight * scale
+
+            metadata_path = image_path.with_suffix(".json")
+            metadata = {}
+            if metadata_path.is_file():
+                try:
+                    with metadata_path.open("r", encoding="utf-8") as metadata_file:
+                        loaded = json.load(metadata_file)
+                    if isinstance(loaded, dict):
+                        metadata = loaded
+                except (OSError, json.JSONDecodeError):
+                    metadata = {"metadata_note": "Sidecar JSON could not be read."}
+
+            return {
+                "path": image_path,
+                "image": image,
+                "metadata": metadata,
+            }
+        except Exception as exc:
+            print(f"Skipping unreadable camera evidence {image_path.name}: {exc}")
+
+    return None
 
 
 def make_styles():
@@ -423,6 +477,7 @@ def build_report(reading):
     lat = reading.get("latitude")
     lon = reading.get("longitude")
     gps = reading.get("gps_status")
+    camera_evidence = load_latest_camera_evidence()
     location, location_error = valid_incident_location(reading)
     map_flowable = None
     map_error = None
@@ -574,10 +629,41 @@ def build_report(reading):
           "validated conversion rule. No conversion is performed here because those details are not present "
           "in the backend response.", s["Body9"]),
         P("Camera evidence", s["SubTitle"]),
-        P("No camera image or camera metadata is supplied by this endpoint. Therefore, this report does not "
-          "claim that a camera image was captured or reviewed.", s["Body9"]),
-        PageBreak(),
     ]
+    if camera_evidence:
+        camera_metadata = camera_evidence["metadata"]
+        story += [
+            P(
+                "An actual image file was found in the report's local evidence folder. "
+                "The file is embedded below; its association with this incident must be "
+                "confirmed from the supplied metadata.",
+                s["Body9"],
+            ),
+            camera_evidence["image"],
+            P(f"Image file: {camera_evidence['path'].name}", s["BodySmall"]),
+        ]
+        metadata_rows = [
+            ("Camera ID", display(camera_metadata.get("camera_id"), "Not supplied")),
+            ("Capture timestamp", display(camera_metadata.get("captured_at"), "Not supplied")),
+            ("Incident ID", display(camera_metadata.get("incident_id"), "Not supplied")),
+            ("Latitude", display(camera_metadata.get("latitude"), "Not supplied")),
+            ("Longitude", display(camera_metadata.get("longitude"), "Not supplied")),
+            ("Image analysis", display(camera_metadata.get("classification"), "Not supplied")),
+            ("Confidence", display(camera_metadata.get("confidence"), "Not supplied")),
+        ]
+        story.append(info_table(metadata_rows, s, key_width=43 * mm))
+        if camera_metadata.get("metadata_note"):
+            story.append(P(str(camera_metadata["metadata_note"]), s["BodySmall"]))
+    else:
+        story.append(P(
+            "No camera image was found. Copy an actual ESP32-CAM image "
+            "(.jpg, .jpeg, .png, or .bmp) into the evidence folder: "
+            + str(EVIDENCE_DIR)
+            + ". Capture time, camera ID, incident ID, and location remain unavailable "
+            "unless supplied in a matching JSON sidecar.",
+            s["Warning"],
+        ))
+    story.append(PageBreak())
 
     # PAGE 4 — LIVE READING AND QUALITY
     story += [
@@ -657,8 +743,21 @@ def build_report(reading):
         table([
             ["Evidence item", "Availability in current endpoint"],
             ["Live sensor JSON", "Available; reproduced on page 7"],
-            ["CCTV / ESP32-CAM frame", "Not supplied"],
-            ["Camera ID and capture time", "Not supplied"],
+            [
+                "CCTV / ESP32-CAM frame",
+                (
+                    f"Attached locally: {camera_evidence['path'].name}"
+                    if camera_evidence else "Not attached"
+                ),
+            ],
+            [
+                "Camera ID and capture time",
+                (
+                    f"{display(camera_evidence['metadata'].get('camera_id'), 'Not supplied')} / "
+                    f"{display(camera_evidence['metadata'].get('captured_at'), 'Not supplied')}"
+                    if camera_evidence else "Not supplied"
+                ),
+            ],
             ["ML confidence score", "Not supplied by this endpoint"],
             ["Crew confirmation", "Not supplied"],
         ], [63 * mm, 104 * mm], s),
@@ -787,8 +886,13 @@ def build_report(reading):
         P("Signature: ____________________________________________", s["Body9"]),
         P("Date and time of review: _______________________________", s["Body9"]),
         Spacer(1, 3 * mm),
-        P("Report limitation: generated from the live backend reading only. Additional incident data, "
-          "Firebase fields, images, and historical case recommendations are not connected in this version.", s["BodySmall"]),
+        P(
+            "Report limitation: generated from the live backend reading. A camera image is embedded only "
+            "when an actual file is placed in the local evidence folder; the backend does not currently "
+            "transfer camera images automatically. Image metadata is shown only when supplied in a matching "
+            "JSON sidecar. Incident association and image interpretation require human verification.",
+            s["BodySmall"],
+        ),
     ]
 
     doc = SimpleDocTemplate(
@@ -816,6 +920,11 @@ def main():
             "led", "latitude", "longitude", "gps_status",
         ):
             print(f"  {key}: {display(reading.get(key))}")
+        evidence = load_latest_camera_evidence()
+        if evidence:
+            print(f"Camera evidence selected: {evidence['path']}")
+        else:
+            print(f"Camera evidence: none found in {EVIDENCE_DIR}")
         build_report(reading)
         print(f"\nPDF CREATED: {OUTPUT_PDF}")
         print(f"File size: {OUTPUT_PDF.stat().st_size / 1024:.1f} KB")
